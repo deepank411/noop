@@ -22,6 +22,7 @@ env:
 jobs:
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 30   # a normal build takes ~6 min; this stops a hung one instead of GitHub's 6 h default
     defaults:
       run:
         working-directory: android
