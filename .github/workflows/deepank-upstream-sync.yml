@@ -1,9 +1,13 @@
-# Fork-only (deepank411/noop): once a week, merge ryanbr/noop main into this fork's main and publish a signed
-# release. A merge conflict never auto-resolves: the run fails and opens an issue, and nothing is released.
+# Fork-only (deepank411/noop): once a week, fast-forward main to ryanbr/noop main, merge main into master (where
+# all fork changes live) and publish a signed release from master. main stays an exact copy of upstream: if it
+# ever diverges, or main -> master conflicts, nothing is auto-resolved: the run fails, opens an issue and
+# releases nothing.
 #
-# Pushing a merge that changes .github/workflows needs a token with the Workflows permission, which the built-in
+# Pushing commits that change .github/workflows needs a token with the Workflows permission, which the built-in
 # GITHUB_TOKEN can never have. Set the SYNC_TOKEN secret (fine-grained PAT on this repo: Contents, Workflows and
 # Issues read/write) so those weeks go through; without it they open an issue instead.
+#
+# Scheduled runs use the workflow file on the default branch, so master must be the default branch.
 name: Upstream sync (deepank)
 
 on:
@@ -27,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: main
+          ref: master
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN || github.token }}
       - id: merge
@@ -40,6 +44,7 @@ jobs:
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/ryanbr/noop.git
           git fetch --no-tags upstream main
+          git fetch --no-tags origin main
 
           open_issue() {  # title, body; one open issue per title
             if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$1\" in:title" --json number --jq '.[].number')" ]; then
@@ -47,35 +52,49 @@ jobs:
             fi
           }
 
-          NEW=$(git rev-list --count HEAD..upstream/main)
-          echo "upstream commits not in main: $NEW"
-          if [ "$NEW" = 0 ]; then echo "merged=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # 1. main must only ever fast-forward to upstream.
+          if ! git merge-base --is-ancestor origin/main upstream/main; then
+            open_issue "Upstream sync: main has diverged from ryanbr/noop" \
+              "origin/main has commits that are not in ryanbr/noop main, so it can't be fast-forwarded. main is meant to be an exact copy of upstream; fork changes belong on master. Fix: move any such commits to master, then \`git push --force-with-lease origin upstream/main:main\`."
+            echo "main has diverged from upstream; opened an issue." >&2
+            exit 1
+          fi
 
-          if ! git merge --no-edit upstream/main; then
+          NEW=$(git rev-list --count HEAD..upstream/main)
+          echo "upstream commits not in master: $NEW"
+          if [ "$NEW" = 0 ]; then
+            git push origin upstream/main:refs/heads/main   # no-op unless main lagged behind
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$HAS_SYNC_TOKEN" != true ] && ! git diff --quiet HEAD...upstream/main -- .github/workflows; then
+            open_issue "Upstream sync: needs SYNC_TOKEN (workflow files changed)" \
+              "Upstream changed files under .github/workflows, which the built-in token can't push. Add the SYNC_TOKEN secret (see deepank-upstream-sync.yml) or sync locally: \`git fetch upstream && git push origin upstream/main:main && git switch master && git merge upstream/main && git push origin master\`."
+            echo "Workflow files changed and no SYNC_TOKEN; opened an issue." >&2
+            exit 1
+          fi
+
+          # 2. Merge upstream into master; never auto-resolve.
+          if ! git merge --no-edit -m "Merge ryanbr/noop main ($(git rev-parse --short upstream/main)) into master" upstream/main; then
             FILES=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
             git merge --abort
             BODY=$(cat <<EOF
-          Merging ryanbr/noop main ($(git rev-parse --short upstream/main)) into main conflicts in:
+          Merging ryanbr/noop main ($(git rev-parse --short upstream/main)) into master conflicts in:
 
           $FILES
 
-          Resolve locally: git fetch upstream && git merge upstream/main, fix the conflicts, build and adb install -r,
-          then git push and gh workflow run deepank-release.yml.
+          main has still been fast-forwarded. Resolve locally: git switch master && git fetch origin && git merge origin/main,
+          fix the conflicts, build and adb install -r, then git push origin master and gh workflow run deepank-release.yml.
           EOF
             )
+            git push origin upstream/main:refs/heads/main
             open_issue "Upstream sync: merge conflict" "$BODY"
             echo "Merge conflict; opened an issue and released nothing." >&2
             exit 1
           fi
 
-          if [ "$HAS_SYNC_TOKEN" != true ] && ! git diff --quiet HEAD@{1} HEAD -- .github/workflows; then
-            open_issue "Upstream sync: needs SYNC_TOKEN (workflow files changed)" \
-              "Upstream changed files under .github/workflows, which the built-in token can't push. Add the SYNC_TOKEN secret (see deepank-upstream-sync.yml) or merge locally: \`git fetch upstream && git merge upstream/main && git push\`."
-            echo "Workflow files changed and no SYNC_TOKEN; opened an issue." >&2
-            exit 1
-          fi
-
-          git push origin HEAD:main
+          git push origin upstream/main:refs/heads/main HEAD:refs/heads/master
           echo "merged=true" >> "$GITHUB_OUTPUT"
 
   release:
