@@ -1,0 +1,75 @@
+# Fork-only (deepank411/noop): build the Android app signed with the fork's own release key and publish it as
+# a GitHub release. Unlike fork-release.yml it commits nothing (no version bump), so upstream syncs never
+# conflict with it. Every APK MUST carry the same signing key: NOOP sets allowBackup=false, so installing an
+# APK signed with any other key means uninstalling first, which deletes all data on the phone.
+name: Release (deepank)
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deepank-release
+  cancel-in-progress: false
+
+env:
+  # SHA-256 of the release signing certificate (public). The build fails if the APK is signed with anything else.
+  EXPECTED_CERT_SHA256: "608185bfe0a41db8fc8cedc4c0c67324b9a101ffa46bb5f91127f8c81c7bbafa"
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/wrapper-validation@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Restore release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NOOP_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.NOOP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NOOP_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ]; then echo "NOOP_KEYSTORE_BASE64 secret is not set" >&2; exit 1; fi
+          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEYSTORE_PASSWORD" > keystore.properties
+      - name: Build release APK
+        run: ./gradlew assembleFullRelease --console=plain
+      - name: Verify signing certificate
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/full/release/*.apk)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          GOT=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          echo "certificate: $GOT"
+          [ "$GOT" = "$EXPECTED_CERT_SHA256" ] || { echo "APK is signed with an unexpected key" >&2; exit 1; }
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER=$(grep -m1 'versionName = "' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          CODE=$(grep -m1 'versionCode = ' app/build.gradle.kts | grep -oE '[0-9]+')
+          SHA=$(git rev-parse --short HEAD)
+          TAG="v${VER}-dk.${SHA}"  # UpdateCheck reads the leading v<semver>
+          cp app/build/outputs/apk/full/release/*.apk "NOOP-${VER}-${SHA}.apk"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing new to publish."
+            exit 0
+          fi
+          gh release create "$TAG" "NOOP-${VER}-${SHA}.apk" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --title "NOOP ${VER} (${SHA})" --latest \
+            --notes "Upstream ryanbr/noop ${VER} (versionCode ${CODE}) + fork changes at ${SHA}. Install over the existing app with \`adb install -r\` or open the APK on the phone; never uninstall first."

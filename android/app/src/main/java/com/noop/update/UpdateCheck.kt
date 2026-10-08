@@ -1,5 +1,6 @@
 package com.noop.update
 
+import com.noop.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -24,7 +25,7 @@ import java.net.URL
  */
 object UpdateCheck {
 
-    private const val ENDPOINT = "https://api.github.com/repos/ryanbr/noop/releases/latest"
+    private val ENDPOINT = "https://api.github.com/repos/${BuildConfig.UPDATE_REPO}/releases/latest"
 
     sealed interface Result {
         data class UpToDate(val version: String) : Result
