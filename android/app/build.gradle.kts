@@ -26,7 +26,7 @@ android {
         applicationId = "com.noop.whoop"
         minSdk = 26
         targetSdk = 34
-        versionCode = 557
+        versionCode = 558
         versionName = "12.1.0"
 
         // Fork: in-app "Check for updates" must point at the fork's releases. Upstream APKs are signed
